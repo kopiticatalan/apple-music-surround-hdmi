@@ -30,6 +30,8 @@ The launcher opens the locally built player; choose your TV using its AirPlay bu
 
 See [HLS setup and playback](README-HLS.md), [live HLS measurements](HLS-TEST-RESULTS.md), and [latency tuning and limits](LATENCY-NOTES.md). Both output paths are lossy 5.1 speaker beds and do not preserve Atmos objects.
 
+The HLS launcher also includes cinematic now-playing visuals: artist photos, a gently moving backdrop, drifting photo prints and opposing title/artist motion. See [visual design and artwork sources](VISUALS.md). Use `--no-visuals` for the plain background.
+
 ## HDMI requirements
 
 - macOS, Xcode Command Line Tools (`xcode-select --install`), Python 3, and FFmpeg with the `dca` encoder and `spdif` muxer. With [Homebrew](https://brew.sh/) already installed: `brew install python ffmpeg`.

@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.0 — cinematic artist visuals, 2026-11-08
+
+- Live Music metadata drives 720p artist photography, slow zoom, layered drifting prints and opposing text motion inspired by Windows Phone 8 live tiles.
+- GPU compositing with decoded textures, cached lighting/shadows and audio-clock backpressure keeps the visual pipeline real time.
+- Asynchronous Apple Music portraits and TheAudioDB galleries, exact artist matching, local bounded caching and source credits. No artwork is bundled.
+- Visuals enabled by the HLS launcher; `--no-visuals` retains the plain background. Synthetic visual integration covers six active AC-3 channels and continuous audio timestamps.
+
 ## 0.3.0 — experimental AirPlay HLS output, 2026-11-08
 
 - Live AC-3 5.1 HLS output from the existing virtual surround capture, with one-second audio-clock-paced segments and bounded cleanup.

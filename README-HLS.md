@@ -2,7 +2,7 @@
 
 A working experimental Mac-side HLS output for [Apple Music surround HDMI](https://github.com/kopiticatalan/apple-music-surround-hdmi). It reuses the virtual surround sink and capture, folds the rendered channels to 5.1, then serves Dolby Digital to the TV through AirPlay media playback.
 
-**Live listening confirmed on 8 November 2026:** MacBook Air M1, macOS 27.2, installed HDMI Lab 16ch driver, Apple Music Atmos content, Hisense 55U7H VIDAA TV. The listener confirmed that the music and surround speakers sounded right. No TV modification was needed.
+**Live listening confirmed on 8 November 2026:** MacBook Air M1, macOS 27.2, installed HDMI Lab 16ch driver, Apple Music Atmos content, Hisense 55U7H VIDAA named your TV. The listener confirmed that the music and surround speakers sounded right. No TV modification was needed.
 
 ```text
 Apple Music Atmos render → HDMI Lab 16ch → virtual mirror capture
@@ -15,7 +15,7 @@ The output is lossy **Dolby Digital 5.1, 48 kHz, 384 kbit/s**, with a small H.26
 ## Requirements
 
 - The existing **HDMI Lab 16ch** and **HDMI Lab 16ch Mirror** devices, configured for **48 kHz, 16-channel, 32-bit float PCM**. This HLS extension does not reinstall drivers. For initial driver setup, use the original HDMI instructions.
-- Python 3, FFmpeg with `ac3`, `libx264`, and HLS support, and Xcode Command Line Tools for building the two Swift helpers.
+- Python 3.9+, FFmpeg with `ac3`, `libx264`, and HLS support, and Xcode Command Line Tools for building the Swift helpers. The visual renderer uses macOS Core Image and normal GPU access.
 - An Apple Music subscription and an Atmos track. Use the settings established for the original experiment: Atmos Automatic, HDMI Passthrough Off, Song Transitions/AutoMix Off, and the existing experimental `multichannelAudioStrategy=0` preference. This bridge does not change Music preferences.
 - The Mac and TV on the same LAN. Supply the TV address with `--tv` or `HLS_TV_IP`. The double-click launcher asks for it when no active session or environment setting supplies it.
 
@@ -30,7 +30,7 @@ The output is lossy **Dolby Digital 5.1, 48 kHz, 384 kbit/s**, with a small H.26
 
    It builds missing Swift helpers, starts the background capture/server, and opens **Surround Stream.app**. Nothing is installed. The app reads the current HLS URL automatically.
 
-3. In **Surround Stream**, use the AirPlay button to choose **your TV**. Playback starts on the TV, which displays a plain dark video image while the music plays. Keep the buffer mode on **Fast** for the tested setup. The displayed mode duration is a requested offset, not a guaranteed audible delay.
+3. In **Surround Stream**, use the AirPlay button to choose **your TV**. The TV displays the animated artist scene while the music plays. Keep the buffer mode on **Fast** for the tested setup. The displayed mode duration is a requested offset, not a guaranteed audible delay.
 4. Leave Music playing into **HDMI Lab 16ch**. Select the TV inside Surround Stream's media AirPlay picker. Selecting the TV as the Mac's general sound output would move Music away from the surround capture device.
 
 Surround Stream automatically mutes local playback so its decoded audio cannot feed back into the virtual capture sink. **Play Live** resumes at the live edge; **Go Live** explicitly clears accumulated delay; **Reconnect** loads a new URL after the bridge is restarted. Closing the app stops its playback; Stop-HLS.command stops capture and serving.
@@ -45,6 +45,10 @@ zsh Play-HLS-over-AirPlay.command --tv 192.168.1.101 --port 8766
 
 The HLS address is session-specific and changes on restart. Requests are accepted only from the Mac, localhost, and the specified TV address. Do not use a second capture bridge at the same time.
 
+## Artist visuals
+
+The launcher enables cinematic artist photography, very slow zoom, drifting photo prints and opposing song/artist text motion. Artwork follows the current Music track. Photos load asynchronously from Apple Music and TheAudioDB, with local caching and on-screen credits. Use `--no-visuals` for the plain background, or add `--visuals` when starting HLSBridge.py directly. See [visual design, artwork sources and privacy](VISUALS.md).
+
 ## Stop
 
 Pause or close Surround Stream, then double-click **Stop-HLS.command**, or run:
@@ -53,7 +57,7 @@ Pause or close Surround Stream, then double-click **Stop-HLS.command**, or run:
 zsh Stop-HLS.command
 ```
 
-This stops capture, encoding and HTTP serving, removes the rolling music segments, and restores the Mac output that was selected when HLS started. Foreground mode (`python3 HLSBridge.py --tv 192.168.1.100`) also supports Control-C. A force kill or power failure can interrupt cleanup; stop normally when possible.
+This stops capture, encoding and HTTP serving, removes the rolling music segments, and restores the Mac output that was selected when HLS started. Foreground mode (`python3 HLSBridge.py`) also supports Control-C. A force kill or power failure can interrupt cleanup; stop normally when possible.
 
 ## Buffering and diagnostics
 
@@ -70,6 +74,7 @@ This stops capture, encoding and HTTP serving, removes the rolling music segment
 ```sh
 zsh Build-HLS.command
 python3 test_hls.py
+python3 test_visuals.py
 python3 test_bridge.py
 ```
 

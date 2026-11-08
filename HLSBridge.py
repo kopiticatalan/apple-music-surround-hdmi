@@ -36,7 +36,7 @@ def atomic_json(path, value):
 
 def build_helpers():
     Bridge.BUILD.mkdir(parents=True, exist_ok=True)
-    for name in ('AudioBridge', 'SinkProbe'):
+    for name in ('AudioBridge', 'SinkProbe', 'TileRenderer'):
         target = Bridge.BUILD / name
         source = HERE / (name + '.swift')
         if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
@@ -83,18 +83,25 @@ def local_address(target):
         return sock.getsockname()[0]
 
 
-def encoder_command(directory, window, duration=0, segment_seconds=1):
+def encoder_command(directory, window, duration=0, segment_seconds=1, visuals=None, video_fd=None):
     # Explicit indices in Bridge.PAN preserve the virtual driver's speaker order.
     cmd = [Bridge.FFMPEG, '-nostdin', '-hide_banner', '-loglevel', 'warning',
         '-probesize', '32', '-analyzeduration', '0',
         '-thread_queue_size', '4', '-f', 'f32le', '-ar', '48000', '-ac', '16',
-        '-i', 'pipe:0', '-filter_complex',
-        '[0:a]asplit=2[programme][clock];[programme]' + Bridge.PAN + '[audio];'
-        '[clock]pan=mono|c0=0*c0,showwaves=s=640x360:r=25:colors=black,format=yuv420p[video]',
-        '-map', '[video]', '-map', '[audio]',
+        '-i', 'pipe:0']
+    graph = '[0:a]asplit=2[programme][clock];[programme]' + Bridge.PAN + '[audio];'
+    if visuals:
+        if video_fd is None:raise ValueError('A live visual video pipe is required')
+        cmd += ['-thread_queue_size','2','-f','rawvideo','-pixel_format','rgba','-video_size','1280x720',
+                '-framerate','25','-i',f'pipe:{video_fd}']
+        graph += ('[clock]pan=mono|c0=0*c0,showwaves=s=1280x720:r=25:colors=black,format=yuv420p[clockvideo];'
+            '[clockvideo][1:v]overlay=shortest=1,format=yuv420p[video]')
+    else:
+        graph += '[clock]pan=mono|c0=0*c0,showwaves=s=640x360:r=25:colors=black,format=yuv420p[video]'
+    cmd += ['-filter_complex_threads','1','-filter_complex',graph, '-map', '[video]', '-map', '[audio]',
         '-c:a', 'ac3', '-b:a', '384k', '-ar', '48000',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-        '-profile:v', 'baseline', '-level:v', '3.0', '-pix_fmt', 'yuv420p',
+        '-profile:v', 'baseline', '-level:v', '3.1' if visuals else '3.0', '-pix_fmt', 'yuv420p',
         '-g', str(round(25*segment_seconds)), '-keyint_min', str(round(25*segment_seconds)),
         '-sc_threshold', '0', '-threads:v', '1', '-max_delay', '0', '-flush_packets', '1',
         '-progress', 'pipe:1', '-stats_period', '1']
@@ -257,6 +264,21 @@ def serve(args):
                 previous_output = inv['defaultOutput']
                 # This stream must remain separate from the QuickTime AirPlay media route.
                 Bridge.set_default(Bridge.MAIN)
+            visuals = None
+            visual_worker = None
+            if args.visuals:
+                visuals = run/'visuals'
+                visuals.mkdir()
+                with (run/'visuals.log').open('wb') as visual_log:
+                    visual_worker = subprocess.Popen([sys.executable,'-u',str(HERE/'TileVisuals.py'),str(visuals)],
+                        stdout=subprocess.PIPE,stderr=visual_log)
+                processes.append(visual_worker)
+                deadline = time.monotonic()+12
+                while not all((visuals/name).exists() for name in ('background.png','text.png')):
+                    if visual_worker.poll() is not None or time.monotonic()>deadline:
+                        raise RuntimeError('Visual renderer did not start. See visuals.log or use --no-visuals.')
+                    time.sleep(.1)
+            state['visuals'] = bool(visuals)
             bind = args.bind or local_address(args.tv)
             server = http.server.ThreadingHTTPServer((bind, args.port),
                 functools.partial(HLSHandler, directory=str(media)))
@@ -271,9 +293,11 @@ def serve(args):
             state['url'] = f'http://{bind}:{server.server_port}/{server.session_token}/master.m3u8'
             state['previousOutput'] = previous_output
             atomic_json(STATE, state)
+            video_variant = ('BANDWIDTH=8000000,RESOLUTION=1280x720,FRAME-RATE=25,CODECS="avc1.42c01f,ac-3"'
+                             if visuals else 'BANDWIDTH=800000,RESOLUTION=640x360,FRAME-RATE=25,CODECS="avc1.42c01e,ac-3"')
             (media / 'master.m3u8').write_text('#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n'
                 f'#EXT-X-START:TIME-OFFSET=-{args.live_offset:.3f},PRECISE=YES\n'
-                '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,FRAME-RATE=25,CODECS="avc1.42c01e,ac-3"\nindex.m3u8\n')
+                '#EXT-X-STREAM-INF:'+video_variant+'\nindex.m3u8\n')
             (media / 'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Apple Music Surround</title>'
                 '<h1>Apple Music Surround</h1><p>Select your TV using the video AirPlay button.</p>'
                 '<video controls playsinline preload="metadata" x-webkit-airplay="allow" src="master.m3u8" width="640"></video>')
@@ -283,8 +307,11 @@ def serve(args):
                 capture = subprocess.Popen(synthetic_capture() if args.synthetic else [str(Bridge.BACKEND), 'capture'],
                     stdout=subprocess.PIPE, stderr=capture_log, env=env)
                 processes.append(capture)
-                encoder = subprocess.Popen(encoder_command(media, args.window, args.duration, args.segment_seconds),
-                    stdin=capture.stdout, stdout=subprocess.PIPE, stderr=encoder_log)
+                video_fd = visual_worker.stdout.fileno() if visual_worker else None
+                encoder = subprocess.Popen(encoder_command(media, args.window, 0, args.segment_seconds, visuals, video_fd),
+                    stdin=capture.stdout, stdout=subprocess.PIPE, stderr=encoder_log,
+                    pass_fds=(video_fd,) if video_fd is not None else ())
+                if visual_worker:visual_worker.stdout.close()
                 processes.append(encoder)
                 capture.stdout.close()
                 progress = {}
@@ -298,6 +325,8 @@ def serve(args):
                 last_segment = None
                 while not STOP.wait(.25):
                     now = time.monotonic()
+                    if args.duration and now-started >= args.duration:
+                        break
                     if encoder.poll() is not None:
                         if args.duration and encoder.returncode == 0:
                             break
@@ -345,6 +374,7 @@ def serve(args):
                 except Exception as error:
                     print('Select your previous sound output manually: ' + str(error), file=sys.stderr)
             shutil.rmtree(media, ignore_errors=True)
+            shutil.rmtree(run/'visuals', ignore_errors=True)
             if read_state().get('pid') == os.getpid():
                 atomic_json(run / 'summary.json', {**state, 'ready': False, 'stopped': True, 'audioSegmentsRemoved': not media.exists()})
                 STATE.unlink(missing_ok=True)
@@ -364,6 +394,8 @@ def main():
     parser.add_argument('--live-offset', type=float, default=3, help='Initial distance behind live in seconds; at least three target durations')
     parser.add_argument('--duration', type=float, default=0, help='Optional test duration; zero streams until stopped')
     parser.add_argument('--synthetic', action='store_true', help='Use quiet synthetic 16-channel tones; do not change Mac audio')
+    parser.add_argument('--visuals', action=argparse.BooleanOptionalAction, default=False,
+                        help='Add the live artist portrait and Metro-style title animation')
     parser.add_argument('--background', action='store_true')
     parser.add_argument('--stop', action='store_true')
     parser.add_argument('--build-only', action='store_true')

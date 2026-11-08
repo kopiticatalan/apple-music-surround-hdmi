@@ -37,6 +37,13 @@ An actual live segment probed as six-channel AC-3 5.1(side). Its decoded RMS lev
 - Existing shared conversion/preflight tests: all five passed, including individual source-channel fold destinations and the original DTS encode/decode path.
 - The two Swift helpers compiled locally. No drivers were reinstalled and no TV firmware/settings were modified.
 
+## Cinematic visuals follow-up
+
+- The dedicated player delivered the 1280×720 H.264 scene with AC-3, six channels at 48 kHz, verified from an actual served segment. At about 82 seconds the TV had fetched 68 segments successfully; the encoder reported no dropped video frames.
+- The current artist gallery supplied five photos. The listener confirmed **“Looks good; music is smooth”** after the cinematic layout was enabled on the TV.
+- The offline multi-photo integration passed with visible encoded video, six active synthetic audio channels, continuous audio timestamps and a metadata change without restarting the encoder. Over its short run, encoder progress was approximately 1.06× with no dropped frames. Normal macOS GPU access is required for this visual check.
+- The existing isolated HLS delivery/cleanup regression also passed again. The visual design, sources, caching and limits are documented in [VISUALS.md](VISUALS.md). These checks do not establish long-term acoustic latency or frame-accurate metadata/audio synchronization.
+
 ## Limits
 
 This is a live experimental listening result, not a long-duration reliability test. End-to-end latency, synchronization against another room, long-run clock drift, reconnect after sleep, and different devices remain unmeasured. This path encodes a 5.1 speaker bed and does not preserve Atmos objects. The HLS service was intentionally left running for the user; Stop-HLS.command performs cleanup and restores the previous Mac output.

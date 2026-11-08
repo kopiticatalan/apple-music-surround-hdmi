@@ -11,3 +11,5 @@ The new bridge, diagnostic, build, test and documentation files are distributed 
 Apple Music and Dolby Atmos are names of their respective owners. DTS is a name of its respective owner. These names describe the tested application, content and output format.
 
 The HLS extension and Surround Stream player are also distributed under GPL-3.0. The AC-3 output is a re-encoded 5.1 speaker bed, not Atmos passthrough. Dolby Digital and AirPlay describe formats and platform interoperability; no endorsement is implied.
+
+Artist photography is fetched at runtime from Apple Music and TheAudioDB and retains its respective rights. No photos or Microsoft assets are distributed. See VISUALS.md for source attribution and API terms.

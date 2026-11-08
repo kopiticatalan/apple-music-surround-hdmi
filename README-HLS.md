@@ -19,7 +19,15 @@ The output is lossy **Dolby Digital 5.1, 48 kHz, 384 kbit/s**, with a small H.26
 - An Apple Music subscription and an Atmos track. Use the settings established for the original experiment: Atmos Automatic, HDMI Passthrough Off, Song Transitions/AutoMix Off, and the existing experimental `multichannelAudioStrategy=0` preference. This bridge does not change Music preferences.
 - The Mac and TV on the same LAN. Supply the TV address with `--tv` or `HLS_TV_IP`. The double-click launcher asks for it when no active session or environment setting supplies it.
 
+## Install for independent playback
+
+Run `python3 install_user.py` to build and copy the runnable package to `~/Applications/Surround Stream`. It creates Desktop shortcuts for **Surround Stream.app**, **Start Surround Server.command** and **Stop Surround Server.command**. The background server is started directly by macOS and survives closing ChatGPT or Terminal. The app can restart the last saved server configuration. See [independent playback and power settings](INDEPENDENT-PLAYBACK.md).
+
+Streaming prevents idle system sleep, and active TV playback holds a latency-critical activity assertion against App Nap. GPU rendering stays enabled. Use the Stop shortcut when finished. These are scoped assertions; global battery settings are not changed.
+
 ## Start playback
+
+After installation, use the Desktop shortcuts or run these commands from `~/Applications/Surround Stream`.
 
 1. Select **HDMI Lab 16ch** as the Mac sound output and start an Atmos song in Music. The Music mini-player should show Dolby Atmos. Stop the old DTS/HDMI bridge before switching to this output path.
 2. Double-click **Play-HLS-over-AirPlay.command**, or run it from Terminal:
@@ -57,7 +65,7 @@ Pause or close Surround Stream, then double-click **Stop-HLS.command**, or run:
 zsh Stop-HLS.command
 ```
 
-This stops capture, encoding and HTTP serving, removes the rolling music segments, and restores the Mac output that was selected when HLS started. Foreground mode (`python3 HLSBridge.py`) also supports Control-C. A force kill or power failure can interrupt cleanup; stop normally when possible.
+This explicitly stops capture, encoding and HTTP serving, removes the rolling music segments, unloads the background job, and restores the previous Mac output. Foreground mode (`python3 HLSBridge.py`) also supports Control-C. Unexpected background termination keeps Music on the virtual output so it does not start playing on the MacBook speakers. A force kill or power failure can interrupt cleanup; stop normally when possible.
 
 ## Buffering and diagnostics
 
@@ -75,12 +83,15 @@ This stops capture, encoding and HTTP serving, removes the rolling music segment
 zsh Build-HLS.command
 python3 test_hls.py
 python3 test_visuals.py
+python3 test_service.py
 python3 test_bridge.py
 ```
 
 `Build-HLS.command` builds the Swift capture/inventory helpers and the local player app. `test_hls.py` runs about seventeen seconds of quiet synthetic sixteen-channel input on a separate localhost server. It checks six-channel AC-3 delivery, continuous audio packet timestamps across segment boundaries, playlist advancement, bounded pruning, HTTP path controls, and stop cleanup. It does not capture Music, change sound routing, or interrupt the running bridge. The existing `test_bridge.py` checks the shared channel fold and original DTS path.
 
 The live test also measured activity in all sixteen Music source channels, probed an actual served segment as AC-3 5.1(side), observed repeated successful TV segment requests, and obtained the listener's confirmation. See [HLS-TEST-RESULTS.md](HLS-TEST-RESULTS.md).
+
+The independent-service regression verifies that the server is owned by macOS (parent PID 1), survives its launcher exiting, serves HLS on localhost and cleans up correctly after explicit or unexpected termination. It uses synthetic audio and does not change sound routing.
 
 ## Source and license
 

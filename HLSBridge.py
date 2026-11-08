@@ -21,11 +21,13 @@ import time
 import urllib.parse
 
 import Bridge
+import HLSService
 
 HERE = Path(__file__).resolve().parent
 RUNTIME = Path(os.environ.get('HLS_RUNTIME', str(HERE / 'runtime'))).resolve()
 STATE = RUNTIME / 'ACTIVE-HLS.json'
 STOP = threading.Event()
+STOP_SIGNAL = None
 
 
 def atomic_json(path, value):
@@ -65,12 +67,16 @@ def matching_process(state):
 def stop_running():
     state = read_state()
     if not matching_process(state):
+        HLSService.unload(RUNTIME)
         print('No running HLS bridge found.')
         return 0
+    atomic_json(RUNTIME/'STOP-HLS.json', {'pid':state['pid']})
     os.kill(state['pid'], signal.SIGINT)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if not STATE.exists():
+            HLSService.unload(RUNTIME)
+            (RUNTIME/'STOP-HLS.json').unlink(missing_ok=True)
             print('HLS stopped; rolling audio segments removed and previous output restored.')
             return 0
         time.sleep(.2)
@@ -214,23 +220,33 @@ def background(args):
         print('Already running: ' + read_state().get('url', 'starting'))
         return 0
     RUNTIME.mkdir(exist_ok=True)
-    command = [sys.executable, '-u', str(HERE / 'HLSBridge.py'),
-               *[arg for arg in sys.argv[1:] if arg != '--background']]
-    with (RUNTIME / 'hls-console.log').open('ab', buffering=0) as log:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
+    arguments=['--tv',args.tv,'--port',str(args.port),'--window',str(args.window),
+        '--segment-seconds',str(args.segment_seconds),'--live-offset',str(args.live_offset),
+        '--duration',str(args.duration),'--visuals' if args.visuals else '--no-visuals']
+    if args.bind:arguments+=['--bind',args.bind]
+    if args.synthetic:arguments+=['--synthetic']
+    command=[sys.executable,'-u',str(HERE/'HLSBridge.py'),*arguments]
+    config=HLSService.settings(RUNTIME)
+    HLSService.save_settings(RUNTIME,{**config,'tv':args.tv,'restartCommand':[command[0],command[1],command[2],'--background',*arguments]})
+    HLSService.start(RUNTIME,command)
     deadline = time.monotonic() + 40
+    last_service_check=0
     while time.monotonic() < deadline:
         state = read_state()
-        if state.get('pid') == process.pid and state.get('ready'):
+        if state.get('ready') and matching_process(state):
             print('Apple Music HLS is running.\n' + state['url'])
             print('Open Surround Stream.app and choose your TV using its AirPlay button.')
             print('Run Stop-HLS.command to stop and clean up.')
             return 0
-        if process.poll() is not None:
-            raise RuntimeError('HLS startup failed:\n' + (RUNTIME / 'hls-console.log').read_text()[-3000:])
+        if time.monotonic()-last_service_check>=1:
+            last_service_check=time.monotonic()
+            failure=HLSService.failure(RUNTIME)
+            if failure is not None:
+                HLSService.unload(RUNTIME)
+                log=RUNTIME/'hls-console.log'
+                raise RuntimeError('Independent server exited ('+str(failure)+'):\n'+(log.read_text()[-1500:] if log.exists() else 'Check the installation path and macOS permissions.'))
         time.sleep(.2)
-    os.kill(process.pid, signal.SIGINT)
+    HLSService.unload(RUNTIME)
     raise RuntimeError('HLS startup timed out; stop requested. Inspect runtime/hls-console.log.')
 
 
@@ -256,12 +272,18 @@ def serve(args):
                  'segmentSeconds': args.segment_seconds, 'clock': 'audio', 'liveOffsetHintSeconds': args.live_offset}
         try:
             if not args.synthetic:
+                # Scoped to this server process; does not alter global power settings.
+                processes.append(subprocess.Popen(['/usr/bin/caffeinate','-i','-w',str(os.getpid())]))
+            if not args.synthetic:
                 build_helpers()
                 with socket.create_connection((args.tv, 7000), timeout=3):
                     pass
                 inv = Bridge.inventory()
                 Bridge.source_ready(inv)
-                previous_output = inv['defaultOutput']
+                config=HLSService.settings(RUNTIME)
+                previous_output = (config.get('previousOutput') if inv['defaultOutput']==Bridge.MAIN else inv['defaultOutput'])
+                if previous_output:
+                    HLSService.save_settings(RUNTIME,{**config,'previousOutput':previous_output})
                 # This stream must remain separate from the QuickTime AirPlay media route.
                 Bridge.set_default(Bridge.MAIN)
             visuals = None
@@ -367,16 +389,24 @@ def serve(args):
                 if server_thread and server_thread.is_alive():
                     server.shutdown()
                 server.server_close()
-            if previous_output is not None:
+            requested=False
+            try:requested=json.loads((RUNTIME/'STOP-HLS.json').read_text()).get('pid')==os.getpid()
+            except (OSError,ValueError):pass
+            managed=os.environ.get('XPC_SERVICE_NAME','').startswith('local.audio.SurroundStream.server.')
+            restore_output = requested or bool(args.duration) or (STOP_SIGNAL==signal.SIGINT and not managed)
+            if previous_output is not None and restore_output:
                 try:
                     Bridge.set_default(previous_output)
                     print('Previous output restored: ' + previous_output, flush=True)
                 except Exception as error:
                     print('Select your previous sound output manually: ' + str(error), file=sys.stderr)
+            elif previous_output is not None:
+                print('Unexpected stop: leaving Music routed to the virtual sink to avoid speaker fallback.',flush=True)
             shutil.rmtree(media, ignore_errors=True)
             shutil.rmtree(run/'visuals', ignore_errors=True)
             if read_state().get('pid') == os.getpid():
-                atomic_json(run / 'summary.json', {**state, 'ready': False, 'stopped': True, 'audioSegmentsRemoved': not media.exists()})
+                atomic_json(run / 'summary.json', {**state, 'ready': False, 'stopped': True,
+                    'stopSignal':STOP_SIGNAL,'outputRestored':restore_output,'audioSegmentsRemoved':not media.exists()})
                 STATE.unlink(missing_ok=True)
             print('HLS stopped. Rolling audio segments removed.', flush=True)
     return 0
@@ -385,7 +415,7 @@ def serve(args):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--tv', default=os.environ.get('HLS_TV_IP') or read_state().get('tv'), help='TV IPv4 address')
+    parser.add_argument('--tv', default=os.environ.get('HLS_TV_IP') or read_state().get('tv') or HLSService.settings(RUNTIME).get('tv'), help='TV IPv4 address')
     parser.add_argument('--bind', help='Local IPv4 address; defaults to the interface reaching the TV')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--window', type=int, default=12, help='Number of segments in the live playlist')
@@ -420,8 +450,10 @@ def main():
         return 0
     if args.background:
         return background(args)
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda *_: STOP.set())
+    def handle_signal(sig,_):
+        global STOP_SIGNAL
+        STOP_SIGNAL=sig;STOP.set()
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):signal.signal(sig,handle_signal)
     return serve(args)
 
 

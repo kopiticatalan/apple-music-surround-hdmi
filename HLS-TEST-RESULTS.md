@@ -44,6 +44,13 @@ An actual live segment probed as six-channel AC-3 5.1(side). Its decoded RMS lev
 - The offline multi-photo integration passed with visible encoded video, six active synthetic audio channels, continuous audio timestamps and a metadata change without restarting the encoder. Over its short run, encoder progress was approximately 1.06× with no dropped frames. Normal macOS GPU access is required for this visual check.
 - The existing isolated HLS delivery/cleanup regression also passed again. The visual design, sources, caching and limits are documented in [VISUALS.md](VISUALS.md). These checks do not establish long-term acoustic latency or frame-accurate metadata/audio synchronization.
 
+## Independent installation follow-up
+
+- The running server was verified with parent PID 1, outside the launcher's process tree. The installed player reported active TV playback, rate 1 and no playback error; the visual controller loaded a five-photo artist gallery.
+- All three Desktop shortcuts resolved to the runnable package under Applications. Both the server's scoped keep-awake assertion and the player's real-time playback activity assertion were present.
+- An isolated synthetic launchd test verified operation after the launcher exited, successful HTTP delivery, explicit-stop cleanup, and unexpected-interrupt cleanup without selecting speaker fallback. The ordinary HLS delivery/cleanup check passed again with six active audio channels and continuous packet timestamps.
+- Closing ChatGPT itself must be checked by the user after the agent turn ends; the independent process ownership and short-lived launcher test establish that the server has no ChatGPT parent-process dependency.
+
 ## Limits
 
 This is a live experimental listening result, not a long-duration reliability test. End-to-end latency, synchronization against another room, long-run clock drift, reconnect after sleep, and different devices remain unmeasured. This path encodes a 5.1 speaker bed and does not preserve Atmos objects. The HLS service was intentionally left running for the user; Stop-HLS.command performs cleanup and restores the previous Mac output.

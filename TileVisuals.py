@@ -159,15 +159,29 @@ def main():
         pool=concurrent.futures.ThreadPoolExecutor(max_workers=2)
         watcher=subprocess.Popen([str(helper),'--now-playing'],stdout=subprocess.PIPE,stderr=metadata_log)
         children.append(watcher)
+        def apply_metadata(info):
+            with lock:
+                if current['key']==info['key']:return
+                current['key']=info['key']
+            send({**info,'imagePaths':[],'artworkCredit':''})
+            (folder/'now-playing.json').write_text(json.dumps(info,indent=2))
+            pool.submit(load_image,info)
         def consume():
             for line in watcher.stdout:
                 try:info=json.loads(line)
                 except ValueError:continue
-                with lock:current['key']=info['key']
-                send({**info,'imagePaths':[],'artworkCredit':''})
-                (folder/'now-playing.json').write_text(json.dumps(info,indent=2))
-                pool.submit(load_image,info)
+                apply_metadata(info)
         threading.Thread(target=consume,daemon=True).start()
+        def player_metadata():
+            path=folder.parent.parent/'music-now-playing.json'
+            previous=None
+            while not STOP.wait(.4):
+                try:
+                    modified=path.stat().st_mtime_ns
+                    if modified!=previous:
+                        info=json.loads(path.read_text());apply_metadata(info);previous=modified
+                except (OSError,ValueError,KeyError):pass
+        threading.Thread(target=player_metadata,daemon=True).start()
         for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,lambda *_:STOP.set())
         try:
             while not STOP.wait(.5):

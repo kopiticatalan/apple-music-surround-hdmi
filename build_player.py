@@ -13,6 +13,8 @@ info = {'CFBundleExecutable':'SurroundStream', 'CFBundleIdentifier':'local.audio
         'CFBundleName':'Surround Stream', 'CFBundleDisplayName':'Surround Stream',
         'CFBundlePackageType':'APPL', 'CFBundleVersion':'1', 'CFBundleShortVersionString':'0.1',
         'LSMinimumSystemVersion':'12.0', 'NSHighResolutionCapable':True,
+        'NSLocalNetworkUsageDescription':'Stream live Dolby Digital surround audio and artist visuals to your AirPlay TV.',
+        'NSAppleEventsUsageDescription':'Read the current Music song and artist for the TV now-playing display.',
         'NSAppTransportSecurity':{'NSAllowsArbitraryLoads':True}}
 (contents/'Info.plist').write_bytes(plistlib.dumps(info))
 subprocess.run(['xcrun','swiftc','-O','-swift-version','5','-parse-as-library','-module-cache-path',

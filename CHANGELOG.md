@@ -1,5 +1,13 @@
 # Changes
 
+## 0.5.0 — independent playback and Desktop shortcuts, 2026-11-08
+
+- Background streaming runs in a user launchd job associated with the player app, outside ChatGPT or Terminal. No login or boot autostart is installed.
+- A user installer places the runnable package under Applications and creates Desktop shortcuts for the app, server and stop control.
+- Unexpected server termination keeps Music on the virtual output. Failed media is paused/muted; Reconnect can restart the saved server configuration.
+- Scoped keep-awake and latency-critical activity assertions support continuous playback. Global power preferences remain unchanged.
+- The player can supply Music metadata to the renderer. Added isolated service-lifecycle checks.
+
 ## 0.4.0 — cinematic artist visuals, 2026-11-08
 
 - Live Music metadata drives 720p artist photography, slow zoom, layered drifting prints and opposing text motion inspired by Windows Phone 8 live tiles.

@@ -6,7 +6,7 @@ has_tv=false
 for argument in "$@"; do
     if [[ "$argument" == --tv || "$argument" == --tv=* ]]; then has_tv=true; fi
 done
-if ! $has_tv && [[ -z "${HLS_TV_IP:-}" && ! -f runtime/ACTIVE-HLS.json ]]; then
+if ! $has_tv && [[ -z "${HLS_TV_IP:-}" && ! -f runtime/ACTIVE-HLS.json && ! -f runtime/SERVICE-HLS.json ]]; then
     read -r 'tv_ip?TV IP address: '
     tv_args=(--tv "$tv_ip")
 fi
@@ -14,4 +14,4 @@ python3 -u HLSBridge.py --background --visuals "${tv_args[@]}" "$@"
 if [[ ! -x 'Surround Stream.app/Contents/MacOS/SurroundStream' ]] || [[ HLSPlayer.swift -nt 'Surround Stream.app/Contents/MacOS/SurroundStream' ]]; then
     python3 build_player.py
 fi
-open "$PWD/Surround Stream.app"
+python3 HLSService.py --player

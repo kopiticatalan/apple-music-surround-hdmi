@@ -21,12 +21,17 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastRecovery = Date.distantPast
     var lastSeekReason = ""
     var seekCount = 0
+    var serverLaunch: Process?
+    var hasUsedAirPlay = false
+    var powerActivity: NSObjectProtocol?
+    var metadataWorker: Process?
     let root = Bundle.main.bundleURL.deletingLastPathComponent()
     var runtime: URL { root.appendingPathComponent("runtime") }
     var targetOffset: Double { [2.0, 3.0, 6.0][mode.indexOfSelectedItem] }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         makeWindow()
+        startMetadata()
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = false
         player.isMuted = true
@@ -34,7 +39,9 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 let active = self.player.isExternalPlaybackActive
-                self.player.isMuted = !active
+                self.player.isMuted = !active || self.player.currentItem?.status == .failed
+                if active { self.hasUsedAirPlay = true }
+                else if self.hasUsedAirPlay { self.player.pause() }
                 self.routeLabel.stringValue = active ? "Playing on AirPlay" : "Choose your TV using AirPlay · local audio muted"
                 if active && self.wantsPlayback { self.seekLive(reason: "AirPlay connected") }
             }
@@ -44,6 +51,34 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async { self?.updateStatus() }
         }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func startMetadata() {
+        try? FileManager.default.createDirectory(at:runtime,withIntermediateDirectories:true)
+        let task = Process(),pipe = Pipe()
+        task.executableURL = root.appendingPathComponent("build/TileRenderer")
+        task.arguments = ["--now-playing"];task.standardOutput = pipe
+        let target = runtime.appendingPathComponent("music-now-playing.json")
+        let logURL = runtime.appendingPathComponent("music-metadata.log")
+        FileManager.default.createFile(atPath:logURL.path,contents:nil)
+        task.standardError = try? FileHandle(forWritingTo:logURL)
+        do { try task.run();metadataWorker = task }
+        catch { return }
+        Thread.detachNewThread {
+            var pending = Data()
+            while true {
+                let chunk = pipe.fileHandleForReading.availableData
+                if chunk.isEmpty { break }
+                pending.append(chunk)
+                while let end = pending.firstIndex(of:10) {
+                    let line = pending.prefix(upTo:end)
+                    if (try? JSONSerialization.jsonObject(with:line)) != nil {
+                        try? Data(line).write(to:target,options:.atomic)
+                    }
+                    pending.removeSubrange(...end)
+                }
+            }
+        }
     }
 
     func makeWindow() {
@@ -121,11 +156,15 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func reconnect() {
+        guard serverLaunch == nil else { return }
         let stateURL = runtime.appendingPathComponent("ACTIVE-HLS.json")
         guard let data = try? Data(contentsOf: stateURL),
               let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              state["ready"] as? Bool == true,
+              let modified = try? stateURL.resourceValues(forKeys:[.contentModificationDateKey]).contentModificationDate,
+              Date().timeIntervalSince(modified)<8,
               let address = state["url"] as? String, let url = URL(string: address) else {
-            delayLabel.stringValue = "Start Play-HLS-over-AirPlay.command, then press Reconnect."
+            startSavedServer()
             return
         }
         let item = AVPlayerItem(url: url)
@@ -133,17 +172,55 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard item === self.player.currentItem else { return }
                 if item.status == .readyToPlay && self.wantsPlayback {
+                    self.player.isMuted = !self.player.isExternalPlaybackActive
                     if self.player.isExternalPlaybackActive { self.seekLive(reason: "stream ready") }
                     else { self.player.isMuted = true; self.player.playImmediately(atRate: 1) }
                 } else if item.status == .failed {
+                    self.player.pause()
+                    self.player.isMuted = true
+                    self.wantsPlayback = false
+                    self.actionButton.title = "Play Live"
                     self.delayLabel.stringValue = item.error?.localizedDescription ?? "Playback failed. Press Reconnect."
                 }
             }
         }
+        player.isMuted = true
         player.replaceCurrentItem(with: item)
         wantsPlayback = true
         actionButton.title = "Pause"
+        // External playback may not load a replacement item until playback is
+        // requested. Stay muted while loading; readyToPlay unmutes only AirPlay.
+        player.playImmediately(atRate:1)
+    }
+
+    func startSavedServer() {
+        player.pause();player.isMuted = true
+        guard let data = try? Data(contentsOf:runtime.appendingPathComponent("SERVICE-HLS.json")),
+              let config = try? JSONSerialization.jsonObject(with:data) as? [String:Any],
+              let command = config["restartCommand"] as? [String],let executable = command.first else {
+            delayLabel.stringValue = "Start the Desktop server shortcut, then press Reconnect."
+            return
+        }
+        let task = Process();task.executableURL = URL(fileURLWithPath:executable)
+        task.arguments = Array(command.dropFirst());task.currentDirectoryURL = root
+        let logURL = runtime.appendingPathComponent("server-launch.log")
+        FileManager.default.createFile(atPath:logURL.path,contents:nil)
+        let log = try? FileHandle(forWritingTo:logURL)
+        task.standardOutput = log;task.standardError = log
+        task.terminationHandler = { [weak self] task in
+            try? log?.close()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.serverLaunch = nil
+                if task.terminationStatus == 0 { self.reconnect() }
+                else { self.delayLabel.stringValue = "Server could not start. Check runtime/server-launch.log." }
+            }
+        }
+        serverLaunch = task;delayLabel.stringValue = "Starting the independent stream server…"
+        do { try task.run() }
+        catch { serverLaunch = nil;delayLabel.stringValue = error.localizedDescription;try? log?.close() }
     }
 
     @objc func changeMode() {
@@ -178,6 +255,13 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func updateStatus() {
         guard let item = player.currentItem else { return }
+        let active = wantsPlayback && player.isExternalPlaybackActive && item.status == .readyToPlay
+        if active && powerActivity == nil {
+            powerActivity = ProcessInfo.processInfo.beginActivity(options:[.userInitiated,.latencyCritical,.idleSystemSleepDisabled],
+                reason:"Realtime surround AirPlay playback")
+        } else if !active,let activity = powerActivity {
+            ProcessInfo.processInfo.endActivity(activity);powerActivity = nil
+        }
         let now = Date()
         let current = player.currentTime().seconds
         let ranges = item.seekableTimeRanges.map(\.timeRangeValue)
@@ -191,7 +275,9 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else if item.status != .failed {
             delayLabel.stringValue = "Waiting for live playback timing…"
         }
-        if wantsPlayback && player.isExternalPlaybackActive && !seeking && player.rate == 0 && now.timeIntervalSince(lastRecovery)>2 {
+        if !player.isExternalPlaybackActive || item.status == .failed { player.isMuted = true }
+        if item.status == .failed { player.pause() }
+        if wantsPlayback && item.status == .readyToPlay && player.isExternalPlaybackActive && !seeking && player.rate == 0 && now.timeIntervalSince(lastRecovery)>2 {
             // Retry a stalled play command without seeking or repeatedly skipping audio.
             lastRecovery = now
             player.playImmediately(atRate: 1)
@@ -218,7 +304,11 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { NSApp.terminate(nil); return true }
-    func applicationWillTerminate(_ notification: Notification) { player.pause(); timer?.invalidate() }
+    func applicationWillTerminate(_ notification: Notification) {
+        player.pause();timer?.invalidate()
+        metadataWorker?.terminate()
+        if let activity = powerActivity { ProcessInfo.processInfo.endActivity(activity) }
+    }
 }
 
 @main

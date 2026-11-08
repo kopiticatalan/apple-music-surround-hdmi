@@ -1,0 +1,11 @@
+build/
+runtime/
+__pycache__/
+*.pyc
+.DS_Store
+*.driver/
+*.wav
+*.mp4
+*.dts
+*.spdif
+*.log

@@ -48,9 +48,10 @@ func streamState(_ stream: AudioObjectID, available: Bool = false) -> [String: A
 }
 let sampleDirectory = ProcessInfo.processInfo.environment["SINK_PROBE_DIR"]
 var recordNumber = 0
+let timestampFormatter = ISO8601DateFormatter()
 func emit(_ record: [String: Any]) {
     var r = record
-    r["time"] = ISO8601DateFormatter().string(from: Date())
+    r["time"] = timestampFormatter.string(from: Date())
     if let data = try? JSONSerialization.data(withJSONObject: r, options: [.sortedKeys]), let line = String(data: data, encoding: .utf8) {
         if let sampleDirectory {
             try? FileManager.default.createDirectory(atPath: sampleDirectory, withIntermediateDirectories: true)
@@ -93,15 +94,23 @@ if CommandLine.arguments.dropFirst().first == "snapshot" { exit(0) }
 final class InputMeter {
     let device: AudioObjectID
     let name: String
+    // Decided once: only the virtual mirrors carry possible IEC 61937 headers.
+    let scansHeaders: Bool
     var proc: AudioDeviceIOProcID?
     let lock = NSLock()
     var peaks = [Float](repeating: 0, count: 32)
     var callbacks: UInt64 = 0
     var frames: UInt64 = 0
-    var bursts: [String: Int] = [:]
-    var history = [UInt16]()
+    var ac3Bursts = 0
+    var eac3Bursts = 0
+    // Last three 16-bit words as a shift register; no per-sample array shuffling.
+    var history: UInt64 = 0
+    var historyCount = 0
     var rejectedBuffers = 0
-    init(_ d: AudioObjectID, _ n: String) { device = d; name = n }
+    init(_ d: AudioObjectID, _ n: String) {
+        device = d; name = n
+        scansHeaders = n == "Atmos Sink Mirror" || n.hasPrefix("HDMI Lab")
+    }
     func start() {
         guard let s = streams(device, kAudioObjectPropertyScopeInput).first,
               let f = values(s, kAudioStreamPropertyVirtualFormat, AudioStreamBasicDescription()).first,
@@ -118,25 +127,38 @@ final class InputMeter {
             let src = raw.assumingMemoryBound(to: Float.self)
             lock.lock(); defer { lock.unlock() }
             callbacks += 1; frames += UInt64(count / ch)
-            for i in 0..<count {
-                let v = src[i]
-                if v.isFinite { peaks[i % ch] = max(peaks[i % ch], abs(v)) }
-                // The existing Atmos Sink converts raw Int16 words to exact float
-                // integer values in its mirror. Match headers only, retain no payload.
-                if (name == "Atmos Sink Mirror" || name.hasPrefix("HDMI Lab")) && i % ch < 2 {
-                    guard v.isFinite, v >= -32768, v <= 32767 else { history.removeAll(keepingCapacity: true); continue }
-                    let word = UInt16(bitPattern: Int16(v.rounded()))
-                    if history.count == 3 {
-                        if history[0] == 0xf872 && history[1] == 0x4e1f {
-                            let type = history[2] & 0x1f
-                            if word > 0 && (type == 1 || type == 21) {
-                                bursts[type == 21 ? "EAC3" : "AC3", default: 0] += 1
-                            }
-                        }
-                        history.removeFirst()
-                    }
-                    history.append(word)
+            // Peaks: walk frame by frame so the channel index needs no modulo.
+            var i = 0
+            while i < count {
+                for c in 0..<ch {
+                    let v = src[i + c]
+                    if v.isFinite && abs(v) > peaks[c] { peaks[c] = abs(v) }
                 }
+                i += ch
+            }
+            guard scansHeaders else { return }
+            // The existing Atmos Sink converts raw Int16 words to exact float
+            // integer values in its mirror. Match headers only, retain no payload.
+            // history holds the previous three words: bits 32–47 oldest, 0–15 newest.
+            i = 0
+            while i < count {
+                for c in 0..<min(2, ch) {
+                    let v = src[i + c]
+                    guard v.isFinite, v >= -32768, v <= 32767 else { history = 0; historyCount = 0; continue }
+                    let word = UInt64(UInt16(bitPattern: Int16(v.rounded())))
+                    if historyCount >= 3 {
+                        let pa = (history >> 32) & 0xffff, pb = (history >> 16) & 0xffff, pc = history & 0xffff
+                        if pa == 0xf872 && pb == 0x4e1f {
+                            let type = pc & 0x1f
+                            if word > 0 && type == 1 { ac3Bursts += 1 }
+                            else if word > 0 && type == 21 { eac3Bursts += 1 }
+                        }
+                    } else {
+                        historyCount += 1
+                    }
+                    history = ((history << 16) | word) & 0xffff_ffff_ffff
+                }
+                i += ch
             }
         }
         guard status == noErr, let proc else { emit(["event": "meterError", "device": name, "createStatus": status]); return }
@@ -145,6 +167,9 @@ final class InputMeter {
     }
     func report() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
+        var bursts: [String: Int] = [:]
+        if ac3Bursts > 0 { bursts["AC3"] = ac3Bursts }
+        if eac3Bursts > 0 { bursts["EAC3"] = eac3Bursts }
         let result: [String: Any] = ["name": name, "callbacks": callbacks, "frames": frames,
                                     "peakByChannel": peaks, "iec61937Headers": bursts]
         peaks = [Float](repeating: 0, count: 32)

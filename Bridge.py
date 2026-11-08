@@ -36,6 +36,16 @@ def inventory():
 def set_default(name):
     subprocess.run([str(PROBE), 'set-default', name], check=True, stdout=subprocess.DEVNULL)
 
+# The full inventory lists every device and format; it is only needed occasionally.
+FORMAT_CHECK_SECONDS = 10
+
+def default_output():
+    """Name of the current default output. Much cheaper than inventory()."""
+    p = subprocess.run([str(PROBE), 'default-name'], text=True, capture_output=True)
+    if p.returncode:
+        raise RuntimeError('Core Audio is unavailable here. Launch the .command file locally in Terminal.')
+    return p.stdout.strip()
+
 def source_ready(inv):
     by_name = {d['name']: d for d in inv['devices']}
     for name, key in [(MAIN, 'output'), (MIRROR, 'input')]:
@@ -148,15 +158,17 @@ def main():
                 playback = subprocess.Popen([str(BACKEND), 'play'], stdin=encoder.stdout, stderr=p_log, env=env)
                 processes.append(playback); encoder.stdout.close()
                 print('Streaming DTS to ' + sink + '. Control-C stops and restores the previous output.', flush=True)
+                last_format_check = time.monotonic()
                 while all(p.poll() is None for p in processes):
                     time.sleep(1)
-                    current = inventory()
-                    source_ready(current)
                     # Starting exclusive HDMI playback may change the system's
                     # default route. Music must continue feeding the virtual sink.
-                    if current['defaultOutput'] != MAIN:
+                    if default_output() != MAIN:
                         set_default(MAIN)
                         print('Music output restored to ' + MAIN, flush=True)
+                    if time.monotonic() - last_format_check >= FORMAT_CHECK_SECONDS:
+                        last_format_check = time.monotonic()
+                        source_ready(inventory())
                 raise RuntimeError('One pipeline stage ended. Inspect the run logs.')
     finally:
         stop(processes)

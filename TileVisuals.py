@@ -116,7 +116,9 @@ def album_cover(info, cache):
     url=matches[0].get('artworkUrl100','').replace('100x100','1000x1000')
     if not (urllib.parse.urlsplit(url).hostname or '').endswith('.mzstatic.com'):raise ValueError('Unexpected artwork host')
     target=cache/(hashlib.sha256(url.encode()).hexdigest()[:24]+'.jpg')
-    if not target.exists():target.write_bytes(fetch(url))
+    if not target.exists():
+        temporary=target.with_suffix('.tmp');temporary.write_bytes(fetch(url));temporary.replace(target)
+    target.touch()
     prune_cache(cache)
     return str(target),'Apple Music · album artwork'
 
@@ -173,12 +175,16 @@ def main():
                 apply_metadata(info)
         threading.Thread(target=consume,daemon=True).start()
         def player_metadata():
+            # The player app writes this when it has Music access; the launchd
+            # job itself may not. Ignore anything written before this session
+            # started, so a stale song from last time never shows on the TV.
             path=folder.parent.parent/'music-now-playing.json'
+            started=time.time()-2
             previous=None
             while not STOP.wait(.4):
                 try:
                     modified=path.stat().st_mtime_ns
-                    if modified!=previous:
+                    if modified!=previous and modified/1e9>=started:
                         info=json.loads(path.read_text());apply_metadata(info);previous=modified
                 except (OSError,ValueError,KeyError):pass
         threading.Thread(target=player_metadata,daemon=True).start()

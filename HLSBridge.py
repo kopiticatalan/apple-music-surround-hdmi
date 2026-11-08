@@ -67,6 +67,8 @@ def matching_process(state):
 def stop_running():
     state = read_state()
     if not matching_process(state):
+        # A job may still be starting before it has written its state file.
+        # bootout sends SIGTERM, which the server treats as an explicit stop.
         HLSService.unload(RUNTIME)
         print('No running HLS bridge found.')
         return 0
@@ -81,6 +83,26 @@ def stop_running():
             return 0
         time.sleep(.2)
     raise RuntimeError('Stop requested, but cleanup has not completed. Inspect runtime/hls-console.log.')
+
+
+def wait_until_ready(deadline, on_tick=None):
+    """Poll the state file until the server reports ready; return the state or None."""
+    last_tick = 0
+    while time.monotonic() < deadline:
+        state = read_state()
+        if state.get('ready') and matching_process(state):
+            return state
+        if on_tick and time.monotonic() - last_tick >= 1:
+            last_tick = time.monotonic()
+            on_tick()
+        time.sleep(.2)
+    return None
+
+
+def announce(state):
+    print('Apple Music HLS is running.\n' + state['url'])
+    print('Open Surround Stream.app and choose your TV using its AirPlay button.')
+    print('Run Stop-HLS.command to stop and clean up.')
 
 
 def local_address(target):
@@ -216,9 +238,27 @@ class HLSHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def background(args):
-    if matching_process(read_state()):
-        print('Already running: ' + read_state().get('url', 'starting'))
-        return 0
+    existing = read_state()
+    if matching_process(existing):
+        if existing.get('ready'):
+            print('Already running: ' + existing['url'])
+            return 0
+        # Still starting: block until it is live, the way a fresh start does,
+        # so callers (and the player app) never spin on an instant exit.
+        print('HLS is still starting; waiting for it to go live.', flush=True)
+        state = wait_until_ready(time.monotonic() + 60)
+        if state:
+            announce(state)
+            return 0
+        raise RuntimeError('The running HLS server did not become ready. Inspect runtime/hls-console.log.')
+    if HLSService.running(RUNTIME):
+        # Job is alive but has not written its state file yet (e.g. compiling helpers).
+        print('HLS server job is starting; waiting for it to go live.', flush=True)
+        state = wait_until_ready(time.monotonic() + 60)
+        if state:
+            announce(state)
+            return 0
+        raise RuntimeError('The HLS server job did not become ready. Inspect runtime/hls-console.log.')
     RUNTIME.mkdir(exist_ok=True)
     arguments=['--tv',args.tv,'--port',str(args.port),'--window',str(args.window),
         '--segment-seconds',str(args.segment_seconds),'--live-offset',str(args.live_offset),
@@ -227,25 +267,23 @@ def background(args):
     if args.synthetic:arguments+=['--synthetic']
     command=[sys.executable,'-u',str(HERE/'HLSBridge.py'),*arguments]
     config=HLSService.settings(RUNTIME)
-    HLSService.save_settings(RUNTIME,{**config,'tv':args.tv,'restartCommand':[command[0],command[1],command[2],'--background',*arguments]})
+    HLSService.save_settings(RUNTIME,{**config,'tv':args.tv,'arguments':arguments,
+        'restartCommand':[command[0],command[1],command[2],'--background',*arguments]})
     HLSService.start(RUNTIME,command)
-    deadline = time.monotonic() + 40
-    last_service_check=0
-    while time.monotonic() < deadline:
-        state = read_state()
-        if state.get('ready') and matching_process(state):
-            print('Apple Music HLS is running.\n' + state['url'])
-            print('Open Surround Stream.app and choose your TV using its AirPlay button.')
-            print('Run Stop-HLS.command to stop and clean up.')
-            return 0
-        if time.monotonic()-last_service_check>=1:
-            last_service_check=time.monotonic()
-            failure=HLSService.failure(RUNTIME)
-            if failure is not None:
-                HLSService.unload(RUNTIME)
-                log=RUNTIME/'hls-console.log'
-                raise RuntimeError('Independent server exited ('+str(failure)+'):\n'+(log.read_text()[-1500:] if log.exists() else 'Check the installation path and macOS permissions.'))
-        time.sleep(.2)
+    def check_job():
+        failure=HLSService.failure(RUNTIME)
+        if failure is not None:
+            HLSService.unload(RUNTIME)
+            log=RUNTIME/'hls-console.log'
+            raise RuntimeError('Independent server exited ('+str(failure)+'):\n'+(log.read_text()[-1500:] if log.exists() else 'Check the installation path and macOS permissions.'))
+    state = wait_until_ready(time.monotonic() + 40, on_tick=check_job)
+    if state:
+        announce(state)
+        return 0
+    # Ask for an explicit stop so the server restores the previous output.
+    state = read_state()
+    if state.get('pid'):
+        atomic_json(RUNTIME/'STOP-HLS.json', {'pid':state['pid']})
     HLSService.unload(RUNTIME)
     raise RuntimeError('HLS startup timed out; stop requested. Inspect runtime/hls-console.log.')
 
@@ -343,6 +381,7 @@ def serve(args):
                 server_thread.start()
                 started = time.monotonic()
                 last_check = 0
+                last_format_check = started
                 last_segment_time = started
                 last_segment = None
                 while not STOP.wait(.25):
@@ -359,11 +398,14 @@ def serve(args):
                         continue
                     last_check = now
                     if not args.synthetic:
-                        inv = Bridge.inventory()
-                        Bridge.source_ready(inv)
-                        if inv['defaultOutput'] != Bridge.MAIN:
+                        # Cheap route check every second; the full format inventory
+                        # only every ten seconds (the capture already refuses non-PCM).
+                        if Bridge.default_output() != Bridge.MAIN:
                             Bridge.set_default(Bridge.MAIN)
                             print('Restored Music capture output to ' + Bridge.MAIN, flush=True)
+                        if now - last_format_check >= Bridge.FORMAT_CHECK_SECONDS:
+                            last_format_check = now
+                            Bridge.source_ready(Bridge.inventory())
                     segments = sorted(media.glob('segment*.ts'))
                     latest = segments[-1].name if segments else None
                     if latest:
@@ -392,8 +434,11 @@ def serve(args):
             requested=False
             try:requested=json.loads((RUNTIME/'STOP-HLS.json').read_text()).get('pid')==os.getpid()
             except (OSError,ValueError):pass
-            managed=os.environ.get('XPC_SERVICE_NAME','').startswith('local.audio.SurroundStream.server.')
-            restore_output = requested or bool(args.duration) or (STOP_SIGNAL==signal.SIGINT and not managed)
+            # Any signal (Control-C, Stop command, launchd bootout, logout) is a
+            # deliberate stop and restores the previous output. Only a crash of a
+            # pipeline stage (no signal) leaves Music on the virtual sink, so the
+            # Mac speakers do not suddenly take over mid-song.
+            restore_output = requested or bool(args.duration) or STOP_SIGNAL is not None
             if previous_output is not None and restore_output:
                 try:
                     Bridge.set_default(previous_output)

@@ -83,46 +83,131 @@ func cmdInfo() {
     log("default output: \(deviceName(def))")
 }
 
+// MARK: - byte ring (lock held only for memcpy; no allocation after init)
+
+final class Ring {
+    private let buf: UnsafeMutableRawPointer
+    let capacity: Int
+    private var r = 0, w = 0, count = 0
+    private let lock = NSLock()
+    init(_ n: Int) {
+        capacity = n
+        buf = UnsafeMutableRawPointer.allocate(byteCount: n, alignment: 16)
+        buf.initializeMemory(as: UInt8.self, repeating: 0, count: n)
+    }
+    deinit { buf.deallocate() }
+    /// Copies `n` bytes in at most two segments. Returns false (and copies nothing) when full.
+    func write(_ src: UnsafeRawPointer, _ n: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if count + n > capacity { return false }
+        let first = min(n, capacity - w)
+        memcpy(buf + w, src, first)
+        if n > first { memcpy(buf, src + first, n - first) }
+        w = (w + n) % capacity
+        count += n
+        return true
+    }
+    func write(_ p: UnsafeRawBufferPointer) -> Bool {
+        guard let base = p.baseAddress, p.count > 0 else { return true }
+        return write(base, p.count)
+    }
+    /// Copies up to `n` bytes out in at most two segments; returns the number copied.
+    func read(into dst: UnsafeMutableRawPointer, _ n: Int) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let m = min(n, count)
+        if m == 0 { return 0 }
+        let first = min(m, capacity - r)
+        memcpy(dst, buf + r, first)
+        if m > first { memcpy(dst + first, buf, m - first) }
+        r = (r + m) % capacity
+        count -= m
+        return m
+    }
+    var filled: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+
 // MARK: - capture
 
 final class Capture {
     let dev: AudioObjectID
     var procID: AudioDeviceIOProcID?
-    let out = FileHandle.standardOutput
+    // One second of 16-channel float PCM. The audio thread only memcpy's into
+    // this; a separate thread does the blocking pipe writes.
+    let ring = Ring(48000 * CAPTURE_CH * 4)
+    var staging: UnsafeMutablePointer<Float>? = nil
+    var stagingCount = 0
+    var overflows = 0
+    var reportedOverflows = 0
     init(_ d: AudioObjectID) { dev = d }
+
     func start() {
         let st = AudioDeviceCreateIOProcIDWithBlock(&procID, dev, nil) { [self] _, inData, _, _, _ in
-            _ = self.dev // Keep the capture owner alive while the I/O block is installed.
             let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
             guard let b = abl.first, let p = b.mData else { return }
             let ch = Int(b.mNumberChannels)
+            guard ch > 0 else { return }
             let frames = Int(b.mDataByteSize) / (ch * 4)
-            // Encoded mirror words are stored as integer-valued floats. Refuse
-            // those buffers rather than treating a bitstream as PCM audio.
-            let check = p.assumingMemoryBound(to: Float.self)
-            for i in 0..<(frames * ch) {
-                if !check[i].isFinite || abs(check[i]) > 4 {
+            let src = p.assumingMemoryBound(to: Float.self)
+            let n = CAPTURE_CH
+            // Single pass: validate every sample (encoded mirror words arrive as
+            // integer-valued floats; refuse those rather than encoding a bitstream
+            // as PCM) and, when the channel counts match, hand the buffer straight
+            // to the ring with no intermediate copy.
+            let total = frames * ch
+            var i = 0
+            while i < total {
+                let v = src[i]
+                if !(v.isFinite && abs(v) <= 4) {
                     log("Source is not safe PCM; turn Music HDMI Passthrough off.")
                     exit(2)
                 }
+                i += 1
             }
-            let src = p.assumingMemoryBound(to: Float.self)
-            let n = CAPTURE_CH
-            var buf = [Float](repeating: 0, count: frames * n)
-            for f in 0..<frames {
-                for c in 0..<min(n, ch) { buf[f * n + c] = src[f * ch + c] }
+            var ok: Bool
+            if n == ch {
+                ok = self.ring.write(UnsafeRawPointer(src), total * 4)
+            } else {
+                let need = frames * n
+                if self.staging == nil || self.stagingCount < need {
+                    // Core Audio keeps the buffer size constant; this runs once.
+                    self.staging?.deallocate()
+                    self.staging = UnsafeMutablePointer<Float>.allocate(capacity: need)
+                    self.stagingCount = need
+                }
+                let dst = self.staging!
+                let copy = min(n, ch)
+                for f in 0..<frames {
+                    let s = src + f * ch, d = dst + f * n
+                    for c in 0..<copy { d[c] = s[c] }
+                    if n > copy { for c in copy..<n { d[c] = 0 } }
+                }
+                ok = self.ring.write(UnsafeRawPointer(dst), need * 4)
             }
-            buf.withUnsafeBytes { raw in
+            if !ok { self.overflows += 1 }
+        }
+        guard st == noErr else { log("capture IOProc error \(st)"); exit(1) }
+        let writer = Thread { [self] in
+            let chunkSize = 65536
+            let chunk = UnsafeMutableRawPointer.allocate(byteCount: chunkSize, alignment: 16)
+            defer { chunk.deallocate() }
+            while true {
+                let got = self.ring.read(into: chunk, chunkSize)
+                if got == 0 { usleep(3000); continue }
                 var offset = 0
-                while offset < raw.count {
-                    let written = write(1, raw.baseAddress! + offset, raw.count - offset)
+                while offset < got {
+                    let written = write(1, chunk + offset, got - offset)
                     if written < 0 && errno == EINTR { continue }
-                    if written <= 0 { exit(0) }
+                    if written <= 0 { exit(0) } // downstream closed the pipe
                     offset += written
+                }
+                if self.overflows != self.reportedOverflows {
+                    self.reportedOverflows = self.overflows
+                    log("capture ring overflowed; dropped buffers so far: \(self.reportedOverflows)")
                 }
             }
         }
-        guard st == noErr else { log("capture IOProc error \(st)"); exit(1) }
+        writer.qualityOfService = .userInteractive
+        writer.start()
         AudioDeviceStart(dev, procID)
         log("capturing from \(deviceName(dev))")
     }
@@ -131,26 +216,32 @@ final class Capture {
 final class RawCapture {
     let dev: AudioObjectID
     var procID: AudioDeviceIOProcID?
+    var staging: UnsafeMutablePointer<Int16>? = nil
+    var stagingCount = 0
     init(_ d: AudioObjectID) { dev = d }
     func start() {
         let st = AudioDeviceCreateIOProcIDWithBlock(&procID, dev, nil) { [self] _, inData, _, _, _ in
-            _ = self.dev // Keep the capture owner alive while the I/O block is installed.
             let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
             guard let b = abl.first, let p = b.mData else { return }
             let ch = Int(b.mNumberChannels)
+            guard ch > 0 else { return }
             let frames = Int(b.mDataByteSize) / (ch * 4)
             let src = p.assumingMemoryBound(to: Float.self)
-            var buf = [Int16](repeating: 0, count: frames * 2)
+            if self.staging == nil || self.stagingCount < frames * 2 {
+                self.staging?.deallocate()
+                self.staging = UnsafeMutablePointer<Int16>.allocate(capacity: frames * 2)
+                self.stagingCount = frames * 2
+            }
+            let buf = self.staging!
             for f in 0..<frames {
                 for c in 0..<min(2, ch) {
                     let v = src[f * ch + c]
                     buf[f * 2 + c] = Int16(max(-32768, min(32767, v.rounded())))
                 }
+                if ch < 2 { buf[f * 2 + 1] = 0 }
             }
-            buf.withUnsafeBytes { raw in
-                let r = write(1, raw.baseAddress, raw.count)
-                if r < 0 { exit(0) }
-            }
+            let r = write(1, buf, frames * 4)
+            if r < 0 { exit(0) }
         }
         guard st == noErr else { log("raw capture IOProc error \(st)"); exit(1) }
         AudioDeviceStart(dev, procID)
@@ -176,27 +267,17 @@ func cmdCapture() {
 
 // MARK: - play (IEC 61937 to HDMI, exclusive; payload supplied by FFmpeg)
 
-final class Ring {
-    var buf: [UInt8]
-    var r = 0, w = 0, count = 0
-    let lock = NSLock()
-    init(_ n: Int) { buf = [UInt8](repeating: 0, count: n) }
-    func write(_ p: UnsafeRawBufferPointer) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        if count + p.count > buf.count { return false }
-        for b in p { buf[w] = b; w = (w + 1) % buf.count }
-        count += p.count
-        return true
+/// Playback state shared between the stdin reader and the HDMI I/O thread.
+final class PlayState {
+    private let lock = NSLock()
+    private var startedValue = false
+    private var underrunValue = 0
+    var started: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return startedValue }
+        set { lock.lock(); startedValue = newValue; lock.unlock() }
     }
-    func read(into dst: UnsafeMutableRawPointer, _ n: Int) -> Int {
-        lock.lock(); defer { lock.unlock() }
-        let m = min(n, count)
-        let d = dst.assumingMemoryBound(to: UInt8.self)
-        for i in 0..<m { d[i] = buf[r]; r = (r + 1) % buf.count }
-        count -= m
-        return m
-    }
-    var filled: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func noteUnderrun() { lock.lock(); underrunValue += 1; lock.unlock() }
+    var underruns: Int { lock.lock(); defer { lock.unlock() }; return underrunValue }
 }
 
 var restoreHDMI: (() -> Void)?
@@ -256,17 +337,17 @@ func cmdPlay() {
     }
 
     let ring = Ring(6144 * 64)
-    var started = false
-    var underruns = 0
+    let state = PlayState()
     let st = AudioDeviceCreateIOProcIDWithBlock(&playProcID, hdmi, nil) { _, _, _, outData, _ in
         let abl = UnsafeMutableAudioBufferListPointer(outData)
+        let started = state.started
         for b in abl {
             guard let p = b.mData else { continue }
             let n = Int(b.mDataByteSize)
             let got = started ? ring.read(into: p, n) : 0
             if got < n {
                 memset(p + got, 0, n - got)
-                if started { underruns += 1 }
+                if started { state.noteUnderrun() }
             }
         }
     }
@@ -275,22 +356,27 @@ func cmdPlay() {
 
     // Reader thread: stdin -> ring
     let reader = Thread {
-        var chunk = [UInt8](repeating: 0, count: 6144)
+        let chunkSize = 6144
+        let chunk = UnsafeMutableRawPointer.allocate(byteCount: chunkSize, alignment: 16)
+        defer { chunk.deallocate() }
         while true {
-            let r = chunk.withUnsafeMutableBytes { read(0, $0.baseAddress, $0.count) }
+            let r = read(0, chunk, chunkSize)
+            if r < 0 && errno == EINTR { continue }
             if r <= 0 { break }
-            chunk.withUnsafeBytes { raw in
-                let slice = UnsafeRawBufferPointer(rebasing: raw[0..<r])
-                while !ring.write(slice) { usleep(2000) }
+            while !ring.write(UnsafeRawPointer(chunk), r) { usleep(2000) }
+            if !state.started && ring.filled >= 6144 * 4 {
+                state.started = true
+                log("streaming IEC 61937 audio to \(deviceName(hdmi))")
             }
-            if !started && ring.filled >= 6144 * 4 { started = true; log("streaming IEC 61937 audio to \(deviceName(hdmi))") }
         }
-        log("input ended (underruns: \(underruns))")
+        log("input ended (underruns: \(state.underruns))")
         restoreHDMI?(); exit(0)
     }
+    reader.qualityOfService = .userInteractive
     reader.start()
     Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-        if underruns > 0 { log("underruns so far: \(underruns)") }
+        let n = state.underruns
+        if n > 0 { log("underruns so far: \(n)") }
     }
     withExtendedLifetime(signalSources) { RunLoop.main.run() }
 }

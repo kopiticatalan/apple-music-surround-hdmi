@@ -65,7 +65,7 @@ Pause or close Surround Stream, then double-click **Stop-HLS.command**, or run:
 zsh Stop-HLS.command
 ```
 
-This explicitly stops capture, encoding and HTTP serving, removes the rolling music segments, unloads the background job, and restores the previous Mac output. Foreground mode (`python3 HLSBridge.py`) also supports Control-C. Unexpected background termination keeps Music on the virtual output so it does not start playing on the MacBook speakers. A force kill or power failure can interrupt cleanup; stop normally when possible.
+This explicitly stops capture, encoding and HTTP serving, removes the rolling music segments, unloads the background job, and restores the previous Mac output. Foreground mode (`python3 HLSBridge.py`) also supports Control-C, and any other deliberate stop (logout, closing the window) restores the output too. Only a crash of the encoder or capture keeps Music on the virtual output, so it does not start playing on the MacBook speakers. A force kill or power failure can interrupt cleanup; stop normally when possible.
 
 ## Buffering and diagnostics
 

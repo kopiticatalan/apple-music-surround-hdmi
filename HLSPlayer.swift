@@ -22,6 +22,7 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastSeekReason = ""
     var seekCount = 0
     var serverLaunch: Process?
+    var serverRetries = 0
     var hasUsedAirPlay = false
     var powerActivity: NSObjectProtocol?
     var metadataWorker: Process?
@@ -167,6 +168,7 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
             startSavedServer()
             return
         }
+        serverRetries = 0
         let item = AVPlayerItem(url: url)
         configure(item)
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -214,8 +216,23 @@ final class StreamPlayer: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.serverLaunch = nil
-                if task.terminationStatus == 0 { self.reconnect() }
-                else { self.delayLabel.stringValue = "Server could not start. Check runtime/server-launch.log." }
+                if task.terminationStatus == 0 {
+                    // Give the server a moment to write a fresh state file; never
+                    // relaunch in a tight loop if it is still coming up.
+                    self.serverRetries += 1
+                    let delay = self.serverRetries > 1 ? 3.0 : 0.5
+                    self.delayLabel.stringValue = "Server is up; connecting…"
+                    DispatchQueue.main.asyncAfter(deadline: .now()+delay) { [weak self] in
+                        guard let self, self.serverLaunch == nil else { return }
+                        if self.serverRetries > 20 {
+                            self.serverRetries = 0
+                            self.delayLabel.stringValue = "Server is not reporting ready. Check runtime/hls-console.log, then press Reconnect."
+                            return
+                        }
+                        self.reconnect()
+                    }
+                }
+                else { self.serverRetries = 0;self.delayLabel.stringValue = "Server could not start. Check runtime/server-launch.log." }
             }
         }
         serverLaunch = task;delayLabel.stringValue = "Starting the independent stream server…"

@@ -1,5 +1,14 @@
 # Changes
 
+## 0.6.0 — cinematic scene, real-time path optimisations, lifecycle fixes
+
+- New now-playing scene: full-bleed graded photography, an accent colour pulled from the artwork, a flat Metro tile with the live-tile flip, light typography with a staggered turnstile entrance, and a dissolve on every change.
+- Renderer performance: ImageIO decoding off the render thread, one reused frame buffer written straight to the encoder, cached lighting, shadow, text and chrome textures.
+- Capture backend: the Core Audio thread now only validates and copies into a one-second ring; a separate thread feeds the encoder pipe. No allocation or blocking write on the audio thread. The HDMI playback ring copies in two `memcpy` blocks instead of byte by byte; shared state is locked.
+- Level meter: header scanning decided once per device and kept in a shift register; peaks walk frame by frame.
+- Both bridges check the default output once a second with the cheap `default-name` probe and run the full format inventory every ten seconds.
+- Lifecycle: a second start while the server is running or starting waits and reports the live address instead of returning instantly or replacing the job; the player backs off instead of relaunching the server in a loop; any signal restores the previous output and only a pipeline crash keeps the virtual sink; stale now-playing files from an earlier session are ignored; `--start` merges saved server options with new flags.
+
 ## 0.5.0 — independent playback and Desktop shortcuts, 2026-11-08
 
 - Background streaming runs in a user launchd job associated with the player app, outside ChatGPT or Terminal. No login or boot autostart is installed.

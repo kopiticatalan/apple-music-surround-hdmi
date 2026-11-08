@@ -1,6 +1,6 @@
-# HDMI Lab: Apple Music surround to DTS 5.1
+# HDMI Lab: Apple Music surround over HDMI or AirPlay
 
-An experimental macOS virtual HDMI sink and live bridge that got Apple Music to render multichannel PCM, then folded it to DTS 5.1 for an HDMI-connected TV and sound system.
+An experimental macOS virtual HDMI sink and live bridges that get Apple Music to render multichannel PCM, then fold it to 5.1 for an HDMI-connected sound system or an AirPlay-enabled TV.
 
 **Observed working:** MacBook Air M1, macOS 27.2, Apple Music Atmos content, and a TV/soundbar path that accepts DTS. Independent surround and height channels were measured before conversion; the listener confirmed audible surround speakers over physical HDMI. Other Macs, Music versions, adapters and TVs are untested.
 
@@ -14,9 +14,23 @@ flowchart LR
     F --> G[TV / sound system decodes DTS 5.1]
 ```
 
-The output is **DTS core 5.1**, not Atmos passthrough or Dolby Digital. The conversion is lossy and does not preserve Atmos object metadata. Stereo tracks remain stereo; the bridge does not create surround content. No Music audio files are saved.
+The HDMI output is **DTS core 5.1**, not Atmos passthrough or Dolby Digital. The conversion is lossy and does not preserve Atmos object metadata. Stereo tracks remain stereo; the bridge does not create surround content. The HDMI bridge saves no Music audio files. The optional HLS bridge described below uses a short rolling disk buffer that is removed on normal stop.
 
-## Requirements
+## Wireless surround over AirPlay
+
+The repository also includes **AC-3 Dolby Digital 5.1 over live HLS**, using the same virtual capture and speaker fold. It was heard working on a Hisense 55U7H VIDAA TV without modifying the TV. The dedicated **Surround Stream** player reduced the listener-reported track-change delay from roughly ten seconds with QuickTime to about **2–4 seconds**. This is a listening estimate, not an instrumented acoustic measurement or a guarantee for other devices.
+
+After installing and configuring the virtual device as below, start the HLS path with your TV's local IP address:
+
+```sh
+zsh Play-HLS-over-AirPlay.command --tv 192.168.1.100
+```
+
+The launcher opens the locally built player; choose your TV using its AirPlay button. Keep Music routed to **HDMI Lab 16ch**. Stop with `zsh Stop-HLS.command`. The existing DTS/HDMI path remains available; run one capture bridge at a time.
+
+See [HLS setup and playback](README-HLS.md), [live HLS measurements](HLS-TEST-RESULTS.md), and [latency tuning and limits](LATENCY-NOTES.md). Both output paths are lossy 5.1 speaker beds and do not preserve Atmos objects.
+
+## HDMI requirements
 
 - macOS, Xcode Command Line Tools (`xcode-select --install`), Python 3, and FFmpeg with the `dca` encoder and `spdif` muxer. With [Homebrew](https://brew.sh/) already installed: `brew install python ffmpeg`.
 - An Apple Music subscription and an Atmos version of a track.

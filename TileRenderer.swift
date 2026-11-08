@@ -222,8 +222,8 @@ final class Renderer {
     }()
 
     lazy var tileShadow: CIImage = {
-        let pad = 80
-        let b = bitmap(Int(tileSize) + pad * 2, Int(tileSize) + pad * 2)
+        let pad = 80.0
+        let b = bitmap(Int(tileSize + pad * 2), Int(tileSize + pad * 2))
         drawInto(b) {
             let shadow = NSShadow()
             shadow.shadowColor = NSColor.black.withAlphaComponent(0.6)
@@ -294,18 +294,23 @@ final class Renderer {
 
     func textLayers(_ s: Snapshot, accent: Accent) {
         let inset = textLeft - blockOrigin.x
+        // Shrink from 76 pt until the title fits two lines at that size (two lines at 76 pt is about 196 px).
+        func twoLines(_ size: CGFloat) -> CGFloat { measure("Ag\nAg", width: textWidth, size: size, weight: .light, tracking: -1.5) }
         var size: CGFloat = 76
-        while size > 44 && measure(s.title, width: textWidth, size: size, weight: .light, tracking: -1.5) > 196 { size -= 2 }
-        let titleHeight = min(196, measure(s.title, width: textWidth, size: size, weight: .light, tracking: -1.5))
+        while size > 44 && measure(s.title, width: textWidth, size: size, weight: .light, tracking: -1.5) > twoLines(size) { size -= 2 }
+        let titleHeight = min(twoLines(size), measure(s.title, width: textWidth, size: size, weight: .light, tracking: -1.5))
         let titleBottom: CGFloat = 164
         let accentColor = NSColor(calibratedRed: accent.r, green: accent.g, blue: accent.b, alpha: 1)
 
         let title = bitmap(Int(blockSize.width), Int(blockSize.height))
         drawInto(title) {
-            let p = NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail
-            (s.title as NSString).draw(in: NSRect(x: inset, y: titleBottom, width: textWidth, height: titleHeight + 4),
-                withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: .light), .foregroundColor: NSColor.white,
-                                 .kern: -1.5, .paragraphStyle: p])
+            // Word-wrap to at most two lines; anything beyond the last visible line ends in an ellipsis.
+            // (.byTruncatingTail in NSString drawing collapses to a single line, so wrap + truncatesLastVisibleLine.)
+            let p = NSMutableParagraphStyle(); p.lineBreakMode = .byWordWrapping
+            (s.title as NSString).draw(with: NSRect(x: inset, y: titleBottom, width: textWidth, height: titleHeight + 4),
+                options: [.usesLineFragmentOrigin, .usesFontLeading, .truncatesLastVisibleLine],
+                attributes: [.font: NSFont.systemFont(ofSize: size, weight: .light), .foregroundColor: NSColor.white,
+                             .kern: -1.5, .paragraphStyle: p])
         }
         let artist = bitmap(Int(blockSize.width), Int(blockSize.height))
         drawInto(artist) {
@@ -392,15 +397,16 @@ final class Renderer {
 
         // Flat Metro tile on the right, with a live-tile flip to the next photo.
         if art.tiles.count > 1 {
+            // The flip closes each 44 s period, so the first one lands at 44 s rather than during the text entrance.
             let flipPeriod = 44.0, flipDuration = 0.75
             let turn = elapsed / flipPeriod
             let phase = (turn - floor(turn)) * flipPeriod
             var tileIndex = (Int(turn) + 1) % art.tiles.count
             var scaleX = 1.0
-            if phase < flipDuration {
-                let t = phase / flipDuration
+            if phase > flipPeriod - flipDuration {
+                let t = (phase - (flipPeriod - flipDuration)) / flipDuration
                 scaleX = max(0.02, abs(cos(.pi * t)))   // never a singular transform
-                if t < 0.5 { tileIndex = (tileIndex + art.tiles.count - 1) % art.tiles.count }
+                if t >= 0.5 { tileIndex = (tileIndex + 1) % art.tiles.count }
             }
             let cx = 1046.0 + 5 * sin(elapsed / 29), cy = 370.0 + 4 * sin(elapsed / 13)
             let shadowOffset = tileShadow.extent.width / 2
